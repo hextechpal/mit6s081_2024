@@ -3,6 +3,8 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/fs.h"
+#include "kernel/stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -132,9 +134,11 @@ runcmd(struct cmd *cmd)
 }
 
 int
-getcmd(char *buf, int nbuf)
+getcmd(char *buf, int nbuf, int is_interactive)
 {
-  write(2, "$ ", 2);
+  if (is_interactive) {
+    write(2, "$ ", 2); // Print prompt only in interactive mode
+  }
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -142,12 +146,21 @@ getcmd(char *buf, int nbuf)
   return 0;
 }
 
+// Function to determine if the input is from a terminal
+int is_input_terminal() {
+  struct stat st;
+  if (fstat(0, &st) < 0) {
+    return 0; // Default to non-terminal if fstat fails
+  }
+  return st.type == T_DEVICE; // Check if input is a terminal device
+}
+
 int
 main(void)
 {
   static char buf[100];
   int fd;
-
+  printf("main called\n");
   // Ensure that three file descriptors are open.
   while((fd = open("console", O_RDWR)) >= 0){
     if(fd >= 3){
@@ -155,9 +168,10 @@ main(void)
       break;
     }
   }
-
+  int is_interactive = is_input_terminal();
+  printf("this shell is interactive=%d\n", is_interactive);
   // Read and run input commands.
-  while(getcmd(buf, sizeof(buf)) >= 0){
+  while(getcmd(buf, sizeof(buf), is_interactive) >= 0){
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
       // Chdir must be called by the parent, not the child.
       buf[strlen(buf)-1] = 0;  // chop \n
