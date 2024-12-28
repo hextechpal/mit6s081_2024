@@ -1,0 +1,6 @@
+usertrap
+7
+user
+lw	a3,0(zero)
+initcode
+1
