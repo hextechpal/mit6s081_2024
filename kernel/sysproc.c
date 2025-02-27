@@ -70,6 +70,18 @@ sys_sleep(void)
   return 0;
 }
 
+uint64 
+sys_trace(void){
+  int mask; 
+
+  argint(0, &mask);
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->mask = mask;
+  release(&p->lock);
+  return 0;  
+}
+
 uint64
 sys_kill(void)
 {
