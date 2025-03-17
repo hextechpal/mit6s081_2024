@@ -88,12 +88,18 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc) {
     if (va >= MAXVA)
         panic("walk");
 
-    for (int level = 2; level > 0; level--) {
+    int level = 2;
+    int last_level = alloc == SUPERPGSIZE ? 1 : 0;
+    for (; level > last_level; level--) {
         pte_t *pte = &pagetable[PX(level, va)];
         if (*pte & PTE_V) {
             pagetable = (pagetable_t)PTE2PA(*pte);
+            // IF the read bit it also set
 #ifdef LAB_PGTBL
             if (PTE_LEAF(*pte)) {
+                if (level != 1) {
+                    panic("walk");
+                }
                 return pte;
             }
 #endif
@@ -104,7 +110,8 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc) {
             *pte = PA2PTE(pagetable) | PTE_V;
         }
     }
-    return &pagetable[PX(0, va)];
+
+    return &pagetable[PX(level, va)];
 }
 
 // Look up a virtual address, return the physical address,
@@ -145,27 +152,29 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     uint64 a, last;
     pte_t *pte;
 
-    if ((va % PGSIZE) != 0)
+    uint64 pgsize = size == SUPERPGSIZE ? SUPERPGSIZE : PGSIZE;
+
+    if ((va % pgsize) != 0)
         panic("mappages: va not aligned");
 
-    if ((size % PGSIZE) != 0)
+    if ((size % pgsize) != 0)
         panic("mappages: size not aligned");
 
     if (size == 0)
         panic("mappages: size");
 
     a = va;
-    last = va + size - PGSIZE;
+    last = va + size - pgsize;
     for (;;) {
-        if ((pte = walk(pagetable, a, 1)) == 0)
+        if ((pte = walk(pagetable, a, (int)pgsize)) == 0)
             return -1;
         if (*pte & PTE_V)
             panic("mappages: remap");
         *pte = PA2PTE(pa) | perm | PTE_V;
         if (a == last)
             break;
-        a += PGSIZE;
-        pa += PGSIZE;
+        a += pgsize;
+        pa += pgsize;
     }
     return 0;
 }
@@ -176,13 +185,12 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free) {
     uint64 a;
     pte_t *pte;
-    int    sz;
 
     if ((va % PGSIZE) != 0)
         panic("uvmunmap: not aligned");
 
-    for (a = va; a < va + npages * PGSIZE; a += sz) {
-        sz = PGSIZE;
+    uint64 pgsize = PGSIZE;
+    for (a = va; a < va + npages * PGSIZE; a += pgsize) {
         if ((pte = walk(pagetable, a, 0)) == 0)
             panic("uvmunmap: walk");
         if ((*pte & PTE_V) == 0) {
@@ -191,9 +199,12 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free) {
         }
         if (PTE_FLAGS(*pte) == PTE_V)
             panic("uvmunmap: not a leaf");
+
+        uint64 pa = PTE2PA(*pte);
+        int    suppg = pa >= SUPBASE;
+        pgsize = suppg ? SUPERPGSIZE : PGSIZE;
         if (do_free) {
-            uint64 pa = PTE2PA(*pte);
-            kfree((void *)pa);
+            suppg ? superfree((void *)pa) : ((void *)pa);
         }
         *pte = 0;
     }
@@ -234,10 +245,13 @@ uint64 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm) {
     if (newsz < oldsz)
         return oldsz;
 
-    oldsz = PGROUNDUP(oldsz);
+    int diff = newsz - oldsz;
+    // oldsz = PGROUNDUP(oldsz);
     for (a = oldsz; a < newsz; a += sz) {
-        sz = PGSIZE;
-        mem = kalloc();
+        int suppage = diff > SUPERPGSIZE && PGROUNDUP(a) == SUPERPGROUNDUP(a);
+        a = PGROUNDUP(a);
+        sz = suppage ? SUPERPGSIZE : PGSIZE;
+        mem = suppage ? superalloc() : kalloc();
         if (mem == 0) {
             uvmdealloc(pagetable, a, oldsz);
             return 0;
@@ -246,7 +260,7 @@ uint64 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm) {
         memset(mem, 0, sz);
 #endif
         if (mappages(pagetable, a, sz, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
-            kfree(mem);
+            suppage ? superfree(mem) : kfree(mem);
             uvmdealloc(pagetable, a, oldsz);
             return 0;
         }
@@ -262,9 +276,19 @@ uint64 uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz) {
     if (newsz >= oldsz)
         return oldsz;
 
-    if (PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
-        int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
-        uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+    uint64 sz = oldsz - newsz;
+    int    suppg = sz >= SUPERPGSIZE && SUPERPGROUNDUP(newsz) == PGROUNDUP(newsz);
+
+    if (suppg) {
+        if (SUPERPGROUNDUP(newsz) < SUPERPGROUNDUP(oldsz)) {
+            int npages = (SUPERPGROUNDUP(oldsz) - SUPERPGROUNDUP(newsz)) / SUPERPGSIZE;
+            uvmunmap(pagetable, SUPERPGROUNDUP(newsz), npages, 1);
+        }
+    } else {
+        if (PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
+            int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+            uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+        }
     }
 
     return newsz;
@@ -307,29 +331,32 @@ int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz) {
     uint64 pa, i;
     uint   flags;
     char  *mem;
-    int    szinc;
-
+    int    szinc = PGSIZE;
+    int    npages = 0;
     for (i = 0; i < sz; i += szinc) {
-        szinc = PGSIZE;
-        szinc = PGSIZE;
         if ((pte = walk(old, i, 0)) == 0)
             panic("uvmcopy: pte should exist");
         if ((*pte & PTE_V) == 0)
             panic("uvmcopy: page not present");
         pa = PTE2PA(*pte);
         flags = PTE_FLAGS(*pte);
-        if ((mem = kalloc()) == 0)
+
+        int suppage = pa >= SUPBASE;
+        szinc = suppage ? SUPERPGSIZE : PGSIZE;
+        mem = suppage ? superalloc() : kalloc();
+        if (mem == 0)
             goto err;
-        memmove(mem, (char *)pa, PGSIZE);
-        if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-            kfree(mem);
+        memmove(mem, (char *)pa, szinc);
+        if (mappages(new, i, szinc, (uint64)mem, flags) != 0) {
+            suppage ? superfree(mem) : kfree(mem);
             goto err;
         }
+        npages++;
     }
     return 0;
 
 err:
-    uvmunmap(new, 0, i / PGSIZE, 1);
+    uvmunmap(new, 0, npages, 1);
     return -1;
 }
 
