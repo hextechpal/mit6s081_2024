@@ -165,7 +165,7 @@ panic(char *s)
   pr.locking = 0;
   printf("panic: ");
   printf("%s\n", s);
-  backtrace();
+  // backtrace();
   panicked = 1; // freeze uart output from other CPUs
   for(;;)
     ;

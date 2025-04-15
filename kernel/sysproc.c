@@ -42,16 +42,32 @@ sys_sbrk(void)
   int n;
 
   argint(0, &n);
+
+  struct proc *p = myproc();
+  acquire(&p->lock);
   addr = myproc()->sz;
-  if(growproc(n) < 0)
+  if (addr + n > MAXVA)
+  {
+    release(&p->lock);
     return -1;
+  }
+  p->sz = addr + n;
+  release(&p->lock);
+
+  if (n < 0)
+  {
+    // printf("calling uvmdealloc\n");
+    uvmdealloc(p->pagetable, addr, p->sz);
+    // printf("uvmdealloc success\n");
+  }
+
   return addr;
 }
 
 uint64
 sys_sleep(void)
 {
-  backtrace();
+  // backtrace();
   int n;
   uint ticks0;
 

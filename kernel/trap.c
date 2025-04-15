@@ -49,11 +49,14 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+
+  int scause = r_scause();
+
+  if (scause == 8)
+  {
     // system call
 
-    if(killed(p))
+    if (killed(p))
       exit(-1);
 
     // sepc points to the ecall instruction,
@@ -65,6 +68,30 @@ usertrap(void)
     intr_on();
 
     syscall();
+  }
+  else if (scause == 13 || scause == 15)
+  {
+    uint64 va = r_stval();
+    char *mem;
+    int allocated = 1;
+    // printf("page fault for stval=%p, va=%p\n", (void *)stval, (void *)va);
+    if (va > p->sz || va < p->trapframe->sp || (mem = kalloc()) == 0)
+    {
+      allocated = 0;
+      // printf("error while allocating page during page fault");
+      setkilled(p);
+    }
+
+    if (allocated)
+    {
+      memset(mem, 0, PGSIZE);
+      if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_R | PTE_U | PTE_W | PTE_X) != 0)
+      {
+        // printf("cannot map pages va=%p mem=%p\n", (void *)va, (void *)mem);
+        kfree(mem);
+        setkilled(p);
+      }
+    }
   }
   else if ((which_dev = devintr()) != 0)
   {
