@@ -9,74 +9,111 @@
 #include "riscv.h"
 #include "defs.h"
 
-void freerange(void *pa_start, void *pa_end);
+void freerange(void *pa_start, void *pa_end, int cpu_id);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
-struct run {
+struct run
+{
   struct run *next;
 };
 
-struct {
+struct kmem
+{
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+};
 
-void
-kinit()
+struct
 {
-  initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  struct kmem kmeml[NCPU];
+} mtable;
+
+void kinit()
+{
+  uint64 pa_start = PGROUNDUP((uint64)end);
+  for (int cpu = 0; cpu < NCPU; cpu++)
+  {
+    // divide physical memory among cpus
+    uint64 chunk = (PHYSTOP - pa_start) / (NCPU - cpu); // remaining division
+    uint64 pa_end = PGROUNDUP(pa_start + chunk);
+    initlock(&mtable.kmeml[cpu].lock, "kmem");
+    mtable.kmeml[cpu].freelist = 0;
+    freerange((void *)pa_start, (void *)pa_end, cpu);
+    pa_start = pa_end;
+  }
 }
 
-void
-freerange(void *pa_start, void *pa_end)
+void freerange(void *pa_start, void *pa_end, int cpu_id)
 {
   char *p;
-  p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
-    kfree(p);
+  p = (char *)PGROUNDUP((uint64)pa_start);
+  struct kmem *kmem = &mtable.kmeml[cpu_id]; // <-- pointer, not copy
+  for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
+  {
+    memset(p, 1, PGSIZE);
+    struct run *r = (struct run *)p;
+    acquire(&kmem->lock);
+    r->next = kmem->freelist;
+    kmem->freelist = r;
+    release(&kmem->lock);
+  }
 }
 
-// Free the page of physical memory pointed at by pa,
-// which normally should have been returned by a
-// call to kalloc().  (The exception is when
-// initializing the allocator; see kinit above.)
-void
-kfree(void *pa)
+void kfree(void *pa)
 {
   struct run *r;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
-  r = (struct run*)pa;
-
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  r = (struct run *)pa;
+  int cpu_id = cpuid();
+  struct kmem *kmem = &mtable.kmeml[cpu_id]; // <-- pointer
+  acquire(&kmem->lock);
+  r->next = kmem->freelist;
+  kmem->freelist = r;
+  release(&kmem->lock);
 }
 
-// Allocate one 4096-byte page of physical memory.
-// Returns a pointer that the kernel can use.
-// Returns 0 if the memory cannot be allocated.
-void *
-kalloc(void)
+void *kalloc(void)
 {
   struct run *r;
+  int cpu_id = cpuid();
+  struct kmem *kmem = &mtable.kmeml[cpu_id]; // <-- pointer
+  acquire(&kmem->lock);
+  r = kmem->freelist;
+  if (r)
+    kmem->freelist = r->next;
+  release(&kmem->lock);
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  if (!r)
+  {
+    // Try to steal a page from other CPUs
+    for (int i = 1; i < NCPU; i++)
+    {
+      int other_cpu = (cpu_id + i) % NCPU;
+      struct kmem *other_kmem = &mtable.kmeml[other_cpu];
+      acquire(&other_kmem->lock);
+      r = other_kmem->freelist;
+      if (r)
+      {
+        other_kmem->freelist = r->next;
+        release(&other_kmem->lock);
+        memset((char *)r, 5, PGSIZE);
+        return (void *)r; // return stolen page
+      }
+      release(&other_kmem->lock);
+    }
+  }
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  if (r)
+  {
+    memset((char *)r, 5, PGSIZE);
+  }
+  return (void *)r;
 }
